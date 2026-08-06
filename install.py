@@ -4,16 +4,26 @@ ClaudeShield one-liner installer.
 
   curl -sSL https://raw.githubusercontent.com/brainstormersia-cmd/agentrouter-autoretry-claudecode/main/install.py | python
 
-Downloads retry-proxy.py to ~/.claude/ and launches interactive setup.
+Downloads all ClaudeShield files to ~/.claude/ and launches interactive setup.
+Works on Windows, macOS, and Linux. Zero dependencies.
 """
 
 import os
 import sys
+import stat
 import urllib.request
 
 REPO = "brainstormersia-cmd/agentrouter-autoretry-claudecode"
-RAW = f"https://raw.githubusercontent.com/{REPO}/main/retry-proxy.py"
-DEST = os.path.join(os.path.expanduser("~"), ".claude", "retry-proxy.py")
+BASE = f"https://raw.githubusercontent.com/{REPO}/main"
+
+FILES = [
+    "retry-proxy.py",
+    "shield-tray.ps1",
+    "claude-shield.bat",
+    "claude-shield.sh",
+]
+
+DEST_DIR = os.path.join(os.path.expanduser("~"), ".claude")
 
 
 def main():
@@ -22,21 +32,30 @@ def main():
     print("  --------------------")
     print()
 
-    os.makedirs(os.path.dirname(DEST), exist_ok=True)
+    os.makedirs(DEST_DIR, exist_ok=True)
 
-    print(f"  Downloading retry-proxy.py...")
-    try:
-        urllib.request.urlretrieve(RAW, DEST)
-    except Exception as e:
-        print(f"  Download failed: {e}")
-        print(f"  Manual: curl -O {RAW}")
-        return 1
+    for filename in FILES:
+        url = f"{BASE}/{filename}"
+        dest = os.path.join(DEST_DIR, filename)
+        print(f"  Downloading {filename}...", end=" ", flush=True)
+        try:
+            urllib.request.urlretrieve(url, dest)
+            # Make shell scripts executable on Unix
+            if filename.endswith(".sh") and sys.platform != "win32":
+                os.chmod(dest, os.stat(dest).st_mode | stat.S_IEXEC)
+            print("OK")
+        except Exception as e:
+            print(f"FAILED: {e}")
+            print(f"  Manual: curl -O {url}")
+            return 1
 
-    print(f"  Saved to {DEST}")
+    print()
+    print(f"  All files saved to {DEST_DIR}")
     print()
 
-    # Launch interactive setup
-    os.execv(sys.executable, [sys.executable, DEST])
+    # Launch interactive setup on the proxy
+    proxy_path = os.path.join(DEST_DIR, "retry-proxy.py")
+    os.execv(sys.executable, [sys.executable, proxy_path])
 
 
 if __name__ == "__main__":
