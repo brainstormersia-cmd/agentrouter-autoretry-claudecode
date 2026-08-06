@@ -265,6 +265,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._stream(resp, status, rheaders)
             else:
                 rbody = resp.read()
+                # Catch empty/malformed 200 responses (gateway returns 200 with
+                # empty body or non-JSON -> Claude Code crashes "malformed response")
+                content_type = (resp.getheader('Content-Type') or '').lower()
+                looks_json = 'json' in content_type or 'text' in content_type or not content_type
+                if status == 200 and looks_json:
+                    stripped = rbody.strip()
+                    if len(stripped) == 0:
+                        # Empty body on 200 -> convert to 503 retryable
+                        Stats.errors += 1
+                        self.log(f"[{rid}] {c('EMPTY200','red')} 200 empty body -> 503")
+                        trigger_animation('NETERR', 503)
+                        self._send_503("Gateway returned empty response. Retrying.")
+                        return
+                    if stripped[:1] not in (b'{', b'[', b'<', b'd', b'a', b'f', b't', b'n'):
+                        # Non-JSON body on a JSON endpoint -> likely an HTML error page
+                        # masked as 200. Convert to 503 retryable.
+                        Stats.errors += 1
+                        self.log(f"[{rid}] {c('MALFORMED','red')} 200 non-JSON -> 503 | {stripped[:80]!r}")
+                        trigger_animation('NETERR', 503)
+                        self._send_503("Gateway returned non-JSON response. Retrying.")
+                        return
                 self._send(status, rbody, rheaders)
         except (http.client.HTTPException, ConnectionError, TimeoutError, OSError) as e:
             Stats.errors += 1
@@ -272,6 +293,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             try: conn.close()
             except: pass
+
+    def _send_503(self, message):
+        """Send a 503 retryable response for empty/malformed 200s."""
+        err = json.dumps({"type":"error","error":{"type":"api_error",
+            "message":message}}).encode()
+        self.send_response(503)
+        self.send_header('Content-Type','application/json')
+        self.send_header('Retry-After','10')
+        self.send_header('Content-Length',str(len(err)))
+        self.send_header('Connection','close')
+        self.end_headers()
+        self.wfile.write(err)
 
     def _send(self, status, body, headers):
         self.send_response(status)
