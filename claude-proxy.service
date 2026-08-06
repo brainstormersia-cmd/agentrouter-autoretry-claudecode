@@ -1,0 +1,11 @@
+[Unit]
+Description=Claude Code Retry Proxy
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.claude/retry-proxy.py --upstream https://agentrouter.org --port 8787
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
