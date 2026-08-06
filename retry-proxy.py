@@ -22,6 +22,14 @@ import threading
 import time
 from urllib.parse import urlparse
 
+# Force UTF-8 on Windows to support Unicode box-drawing + emojis
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 VERSION = "2.1.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
