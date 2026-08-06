@@ -84,28 +84,6 @@ BASIC_COLORS = {
 # 256-color rainbow palette
 RAINBOW = [196, 202, 208, 214, 220, 226, 190, 154, 118, 82, 46, 47, 48, 49, 50, 51, 45, 39, 33, 27, 21, 57, 93, 129, 165, 201]
 
-# Basic (8-color) rainbow for fallback terminals
-RAINBOW_BASIC = ['91', '93', '92', '96', '94', '95']
-
-def rainbow_text(text, offset=0):
-    """Color text with cycling rainbow colors."""
-    if _NO_COLOR:
-        return text
-    result = []
-    for i, ch in enumerate(text):
-        if ch == ' ':
-            result.append(ch)
-        else:
-            color = RAINBOW[(i + offset) % len(RAINBOW)]
-            result.append(f"\033[38;5;{color}m{ch}\033[0m")
-    return ''.join(result)
-
-def c(text, color):
-    if _NO_COLOR:
-        return text
-    colors = {'green':'\033[92m','red':'\033[91m','yellow':'\033[93m',
-              'cyan':'\033[96m','bold':'\033[1m','dim':'\033[2m','reset':'\033[0m'}
-    return f"{colors.get(color,'')}{text}{colors['reset']}"
 
 # Animation state
 class AnimState:
@@ -118,69 +96,121 @@ class AnimState:
     line_len = 0
 
 SHIELD_ART = [
-    "  ██████╗██╗  ██╗██████╗  ██████╗ ███████╗██████╗  ██╗   ██╗███████╗",
-    " ██╔════╝██║  ██║██╔══██╗██╔═══██╗██╔════╝██╔══██╗██║   ██║██╔════╝",
-    " ██║     ███████║██████╔╝██║   ██║█████╗  ██████╔╝██║   ██║███████╗",
-    " ██║     ██╔══██║██╔══██╗██║   ██║██╔══╝  ██╔══██╗██║   ██║╚════██║",
-    " ╚██████╗██║  ██║██║  ██║╚██████╔╝███████╗██║  ██║╚██████╔╝███████║",
-    "  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+    "  ###### ##   ## #######  ####### ####### #######  ##      ## #######",
+    " ##          ## ##  ##   # ##     ##  ##  ##   ##  ##    ##  ##     ",
+    " ##  #### #####    #####   #####  #####   #######   ##  ##   #####  ",
+    " ##   ## ##  ##   ##      ##     ## ##    ##   ##    ####    ##     ",
+    "  ###### ##  ##   ##       #######  ## ### ##   ##     ##     ###### ",
 ]
 
-SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
-SHIELD_FRAMES = ['🛡️','🛡️','🛡️','🛡️']
+# RGB truecolor rainbow (more vivid than 256-color)
+RAINBOW_RGB = [
+    (255,0,0), (255,127,0), (255,255,0), (127,255,0),
+    (0,255,0), (0,255,127), (0,255,255), (0,127,255),
+    (0,0,255), (127,0,255), (255,0,255), (255,0,127),
+]
+
+def rgb(text, r, g, b):
+    """Truecolor RGB ANSI escape."""
+    if _NO_COLOR:
+        return text
+    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+
+def rainbow_text(text, offset=0):
+    """Color text with cycling rainbow RGB colors."""
+    if _NO_COLOR:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        if ch == ' ':
+            result.append(ch)
+        else:
+            r, g, b = RAINBOW_RGB[(i + offset) % len(RAINBOW_RGB)]
+            result.append(rgb(ch, r, g, b))
+    return ''.join(result)
+
+def c(text, color):
+    if _NO_COLOR:
+        return text
+    colors = {'green':'\033[92m','red':'\033[91m','yellow':'\033[93m',
+              'cyan':'\033[96m','bold':'\033[1m','dim':'\033[2m','reset':'\033[0m',
+              'orange':'\033[38;2;255;165;0m'}
+    return f"{colors.get(color,'')}{text}{colors['reset']}"
+
+# Animation state
+class AnimState:
+    active = False
+    last_action = ""
+    last_status = 0
+    spinner_frame = 0
+    rainbow_offset = 0
+    stop_flag = False
+    line_len = 0
+
+SHIELD_FRAMES = ['*']
+SPINNER = ['|','/','-','\\']
 BAR_FRAMES = [
-    '▁▁▁▁▁▁▁▁▁▁▁',
-    '▁▁▂▂▃▃▄▄▅▅▆',
-    '▂▂▃▃▄▄▅▅▆▆▇',
-    '▃▃▄▄▅▅▆▆▇▇█',
-    '▄▅▆▇█▇▆▅▄▃▂',
-    '▅▆▇█▇▆▅▄▃▂▁',
-    '▆▇█▇▆▅▄▃▂▁▁',
-    '▇█▇▆▅▄▃▂▁▁▁',
+    '..........',
+    ':.........',
+    '::........',
+    ':::.......',
+    '::::......',
+    ':::::.....',
+    '::::::....',
+    ':::::::...',
+    '::::::::..',
+    ':::::::::.',
+    '::::::::::',
+    ':::::::::.',
+    '::::::::..',
+    ':::::::...',
+    '::::::....',
+    ':::::.....',
+    '::::......',
+    ':::.......',
+    '::........',
+    ':.........',
 ]
 
 
 def animation_thread():
-    """Background animation that shows status when proxy is active."""
+    """Background animation - rainbow spinner when proxy is active."""
     while not AnimState.stop_flag:
         if AnimState.active:
             frame = SPINNER[AnimState.spinner_frame % len(SPINNER)]
             bar = BAR_FRAMES[AnimState.spinner_frame % len(BAR_FRAMES)]
-            shield = SHIELD_FRAMES[AnimState.spinner_frame % len(SHIELD_FRAMES)]
             offset = AnimState.rainbow_offset
 
+            # Spinner frame in cycling rainbow color
+            sr, sg, sb = RAINBOW_RGB[offset % len(RAINBOW_RGB)]
+            spinner_str = rgb(frame, sr, sg, sb)
+
+            # CLAUDE (orange) + SHIELD (rainbow)
+            claude_str = c("CLAUDE", "orange")
+            shield_str = rainbow_text("SHIELD", offset)
+
+            # Action label
             action_colors = {
-                'CONVERT': 'cyan',
-                'RETRY': 'yellow',
-                'NETERR': 'red',
-                'PASS': 'dim',
-                'OK': 'green',
+                'CONVERT': (0, 255, 255),   # cyan
+                'RETRY':   (255, 255, 0),   # yellow
+                'NETERR':  (255, 0, 0),     # red
+                'PASS':    (128, 128, 128), # gray
+                'OK':      (0, 255, 0),     # green
             }
-            ac = action_colors.get(AnimState.last_action, 'green')
+            ar, ag, ab = action_colors.get(AnimState.last_action, (0, 255, 0))
+            action_str = rgb(f"[{AnimState.last_action}]", ar, ag, ab)
             status = AnimState.last_status
 
-            # Build animated status line - rainbow spinner + rainbow text + rainbow bar
-            # Spinner in rainbow (cycles color per frame)
-            spinner_color = RAINBOW[AnimState.rainbow_offset % len(RAINBOW)]
-            spinner_str = f"\033[38;5;{spinner_color}m{frame}\033[0m"
-            
-            # CLAUDE orange + SHIELD rainbow
-            claude_str = f"\033[38;5;208mCLAUDE\033[0m"
-            shield_str = rainbow_text("SHIELD", offset)
-            
-            # Action label in its color
-            action_str = c(f"[{AnimState.last_action}]", ac)
-            
             # Bar in rainbow
-            bar_str = rainbow_text(bar, offset + 5)
-            
-            status_text = f" {shield} {spinner_str} {claude_str}{shield_str} {action_str} "
-            if status:
-                status_text += f"{c(str(status), 'bold')} "
-            status_text += f"{bar_str} "
-            status_text += f"{c('protecting...', 'dim')}"
+            bar_str = rainbow_text(bar, offset + 3)
 
-            # Pad and overwrite
+            status_text = f" {spinner_str} {claude_str}{shield_str} {action_str} "
+            if status:
+                status_text += rgb(str(status), 255, 255, 255)
+                status_text += " "
+            status_text += f"{bar_str} {c('protecting...', 'dim')}"
+
+            # Overwrite line in place
             pad = max(0, AnimState.line_len - len(status_text))
             sys.stderr.write(f"\r\033[K{status_text}{' ' * pad}")
             sys.stderr.flush()
@@ -188,24 +218,21 @@ def animation_thread():
 
             AnimState.spinner_frame += 1
             AnimState.rainbow_offset += 1
-            time.sleep(0.12)
+            time.sleep(0.1)
         else:
             time.sleep(0.3)
 
-    # Clear animation line on stop
     if AnimState.line_len > 0:
         sys.stderr.write(f"\r\033[K")
         sys.stderr.flush()
 
 
 def trigger_animation(action, status=0):
-    """Activate the animation with a specific action."""
     AnimState.active = True
     AnimState.last_action = action
     AnimState.last_status = status
 
 def stop_animation():
-    """Deactivate the animation."""
     AnimState.active = False
     if AnimState.line_len > 0:
         sys.stderr.write(f"\r\033[K")
@@ -214,29 +241,28 @@ def stop_animation():
 
 
 def orange_text(text):
-    """Color text in orange (256-color)."""
     if _NO_COLOR:
         return text
-    return f"\033[38;5;208m{text}\033[0m"
+    return f"\033[38;2;255;165;0m{text}\033[0m"
 
 def show_banner(upstream, host, port):
     """Show CLAUDE (orange) + SHIELD (rainbow) ASCII art banner."""
-    # Split each line: first ~28 chars = CLAUDE (orange), rest = SHIELD (rainbow)
-    split_pos = 28
+    split_pos = 30
     for line in SHIELD_ART:
         if line.strip():
             claude_part = line[:split_pos]
             shield_part = line[split_pos:]
-            print(f"  {orange_text(claude_part)}{rainbow_text(shield_part, offset=int(time.time()*8) % len(RAINBOW))}")
-    
+            offset = int(time.time() * 8) % len(RAINBOW_RGB)
+            print(f"  {orange_text(claude_part)}{rainbow_text(shield_part, offset)}")
+
     print()
-    print(f"  {c('v' + VERSION, 'dim')}  ·  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}")
+    print(f"  {c('v' + VERSION, 'dim')}  -  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}")
     print(f"  {c('Proxying to', 'dim')} {c(upstream, 'cyan')}")
     print()
-    print(f"  {c('🛡️  Shield active', 'green')}  {c('- Claude Code will auto-retry through outages', 'dim')}")
+    print(f"  {c('[ Shield active ]', 'green')}  {c('Claude Code will auto-retry through outages', 'dim')}")
     print(f"  {c('Press Ctrl+C to stop.', 'dim')}")
     print()
-    print(f"  {rainbow_text('● ● ● ● ● ● ● ● ● ●', offset=0)}")
+    print(f"  {rainbow_text('* * * * * * * * * *', offset=0)}")
     print()
 
 
