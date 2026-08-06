@@ -1,203 +1,189 @@
-# 🛡️ ClaudeShield
+# ClaudeShield
 
-### Never let Claude Code crash on gateway rate limits again
+<p align="center">
+  <img src="assets/logo.png" alt="ClaudeShield" width="480">
+</p>
 
-A lightweight proxy that makes Claude Code survive rate limits, outages, and provider switches - automatically. **Zero dependencies. 1-minute setup.**
+<p align="center">
+  A local reliability proxy that keeps Claude Code alive through gateway outages.
+</p>
+
+<p align="center">
+  <a href="https://github.com/brainstormersia-cmd/agentrouter-autoretry-claudecode/blob/main/LICENSE">MIT License</a>
+  &middot;
+  <a href="#quickstart">Quickstart</a>
+  &middot;
+  <a href="#how-it-works">How It Works</a>
+  &middot;
+  <a href="#configuration">Configuration</a>
+</p>
 
 ---
 
-## 🚀 Get Started (1 minute)
+## The Problem
 
-### Step 1: Download `retry-proxy.py`
+Claude Code auto-retries `429` and `5xx` errors, but stops dead on `403` and `400`. Most third-party gateways (AgentRouter, Lumosel, Aerolink) return `403` for quota limits instead of the standard `429`. Some return errors in Chinese (`用户额度不足`). Some return `200` with an error hidden inside the SSE stream body.
 
-Download `retry-proxy.py` from this repo.
+Result: your coding session crashes. You restart manually. You lose context.
 
-### Step 2: Run it
+## The Solution
+
+ClaudeShield is a local Python proxy that sits between Claude Code and your gateway. It:
+
+- Converts non-retryable `403`/`400`/`504` errors into `429` + `Retry-After`
+- Peeks at the first 8KB of SSE streams to detect errors hidden in `200` responses
+- Filters `data: null` SSE events that break Anthropic parsers
+- Injects the `claude-cli/1.0.0` User-Agent header that AgentRouter requires
+- Detects Chinese error messages (`用户额度不足`, `无权访问模型`)
+- Uses a circuit breaker to prevent infinite retry loops on permanent errors
+- Forwards all auth headers from Claude Code without storing them
+
+```
+Claude Code  -->  ClaudeShield (localhost:8787)  -->  AgentRouter
+                       |
+                       +-- 403 quota?   --> 429 + Retry-After (client retries)
+                       +-- 504 timeout?  --> 429 + Retry-After (client retries)
+                       +-- 200 + error in SSE? --> 503 (client retries)
+                       +-- 403 no model? --> pass through (circuit breaker, fail fast)
+                       +-- 200 OK?       --> stream passthrough (zero overhead)
+```
+
+## Quickstart
+
+### 1. Download
+
+```bash
+curl -O https://raw.githubusercontent.com/brainstormersia-cmd/agentrouter-autoretry-claudecode/main/retry-proxy.py
+```
+
+### 2. Run interactive setup
 
 ```bash
 python retry-proxy.py
 ```
 
-It will ask you 3 simple questions:
+Answer 3 questions: gateway, API key, model. It auto-configures `~/.claude/settings.json`.
 
-```
-  ClaudeShield Setup  v2.0.0
-
-  This will configure Claude Code to survive rate limits.
-  Answer 3 questions and you're done.
-
-  Which gateway are you using?
-    1. AgentRouter (https://agentrouter.org)
-    2. Lumosel (https://api.lumosel.vip)
-    3. Aerolink (https://capi.aerolink.lat)
-    4. Custom URL
-
-  > 1
-
-  Enter your AgentRouter API key
-  > sk-xxxx...
-
-  Which model? (press Enter for claude-opus-4-8)
-  > 
-
-  [OK] Copied proxy to ~/.claude/retry-proxy.py
-  [OK] Updated ~/.claude/settings.json
-
-  Done! Setup complete.
-
-  Now run these two commands:
-
-    1. Start the proxy:
-       python ~/.claude/retry-proxy.py --start
-
-    2. In another terminal, launch Claude Code:
-       claude --dangerously-skip-permissions
-
-  That's it! Claude Code will now survive rate limits.
-```
-
-### Step 3: Launch Claude Code
+### 3. Launch Claude Code
 
 ```bash
 claude --dangerously-skip-permissions
 ```
 
-**Done.** Claude Code now survives rate limits, outages, and provider switches automatically.
+Done. Claude Code now survives gateway outages automatically.
 
----
+## How It Works
 
-## 🎯 What Problem Does This Solve?
+### Error Classification
 
-When you run Claude Code against a third-party gateway, it crashes on rate limits:
-
-| What happens | Gateway returns | Without ClaudeShield | With ClaudeShield |
+| Gateway returns | Body contains | ClaudeShield action | Claude Code sees |
 |:--|:--|:--|:--|
-| Rate limit hit | `403` or `400` | 💥 Crashes, restart manually | ✅ Auto-retries |
-| Provider saturated | `429` | ⏳ Sometimes retries | ✅ Retries |
-| Gateway timeout | `504` | 💥 Crashes | ✅ Auto-retries |
-| Error in Chinese | `403 用户额度不足` | 💥 Doesn't recognize it | ✅ Auto-retries |
-| Network drops | `ConnectionReset` | 💥 Crashes | ✅ Auto-retries |
-| Wrong model | `403 "no access"` | 💥 Crashes | ⚠️ Fails fast (no loop) |
+| `403` | `用户额度不足` (quota) | Convert to `429` + Retry-After: 20s | Auto-retry |
+| `403` | `无权访问模型` (no model access) | Pass through (circuit breaker) | Fail fast |
+| `400` | `rate_limit`, `quota`, `exhausted` | Convert to `429` + Retry-After: 20s | Auto-retry |
+| `504` | Gateway timeout | Convert to `429` + Retry-After: 20s | Auto-retry |
+| `429` | Rate limit | Pass through + Retry-After: 15s | Auto-retry |
+| `500`-`530` | Server error | Pass through + Retry-After: 15s | Auto-retry |
+| `200` | Empty body | Convert to `503` + Retry-After: 10s | Auto-retry |
+| `200` | Non-JSON (HTML error page) | Convert to `503` + Retry-After: 10s | Auto-retry |
+| `200` | SSE with `type:error` inside | Convert to `503` + Retry-After: 10s | Auto-retry |
+| `200` + valid SSE | `message_start` present | Stream passthrough | Normal response |
+| `401` | Invalid key | Pass through | Fail fast |
+| `404` | Model not found | Pass through | Fail fast |
+| Network error | Connection reset | Convert to `503` + Retry-After: 10s | Auto-retry |
 
----
+### Circuit Breaker
 
-## ⚙️ How It Works
+The proxy distinguishes **retryable** errors from **permanent** ones:
 
-```
-Claude Code → localhost:8787 (ClaudeShield) → Your gateway
-                    ↓
-          403 rate limit    → 429 + Retry-After  → Claude Code retries ✅
-          400 "plan limit"  → 429 + Retry-After  → Claude Code retries ✅
-          504 gateway out   → 429 + Retry-After  → Claude Code retries ✅
-          429 / 5xx         → pass + Retry-After → Claude Code retries ✅
-          network drop      → 503 + Retry-After  → Claude Code retries ✅
-          wrong model       → pass through        → Fails fast (no loop) ⚠️
-          200 + SSE stream  → direct passthrough  → Normal response ✅
-```
+- **Retryable**: quota, rate limit, capacity, timeout, server error, network drop
+- **Permanent**: model not accessible, invalid auth, non-existent endpoint
 
-### Circuit breaker (the important part)
+Permanent errors pass through without conversion. This prevents the infinite retry loop that freezes Claude Code at 95% context compaction when the "small fast model" is not available on the gateway.
 
-Claude Code compacts context at 95% using a "small model" (e.g. `claude-sonnet-5`). If your gateway doesn't have that model, you get `403 "no access to model"`. Without ClaudeShield, this loops forever and freezes your session. ClaudeShield detects this and **fails fast** instead of looping.
+### SSE Stream Inspection
 
----
+Claude Code uses streaming (Server-Sent Events). AgentRouter sometimes returns `HTTP 200` with an error payload inside the SSE stream body instead of `message_start`. ClaudeShield reads the first 8KB of every stream and checks for error markers before forwarding. If an error is detected, it converts the response to `503` so Claude Code retries.
 
-## 📋 Requirements
+### Stats Endpoint
 
-- **Python 3.8+** (already installed on most systems)
-- **Claude Code v2.1.186+**
-
-No `pip install` needed. ClaudeShield uses only Python's standard library.
-
----
-
-## 🔧 Commands
+The proxy exposes telemetry for monitoring:
 
 ```bash
-python retry-proxy.py                  # Interactive setup (recommended)
-python retry-proxy.py --start          # Just start the proxy (skip setup)
+curl http://127.0.0.1:8787/stats
+```
+
+```json
+{
+  "version": "3.1.0",
+  "uptime_seconds": 45.9,
+  "requests": 127,
+  "converted": 14,
+  "passed": 110,
+  "errors": 3,
+  "retry_rate": 0.1102
+}
+```
+
+## Configuration
+
+### settings.json
+
+The interactive setup writes this to `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+    "ANTHROPIC_API_KEY": "your-gateway-key",
+    "CLAUDE_CODE_RETRY_WATCHDOG": "1",
+    "CLAUDE_CODE_MAX_RETRIES": "300"
+  }
+}
+```
+
+### CLI
+
+```bash
+python retry-proxy.py                              # Interactive setup
+python retry-proxy.py --start                     # Start with defaults
 python retry-proxy.py --start --upstream https://api.lumosel.vip  # Different gateway
-python retry-proxy.py --start --port 9090  # Custom port
-python retry-proxy.py --version       # Show version
+python retry-proxy.py --start --port 9090          # Custom port
+python retry-proxy.py --version                    # Show version
 ```
 
----
+### Supported Gateways
 
-## 🖥️ Auto-Start (optional)
+| Gateway | URL | Notes |
+|:--|:--|:--|
+| AgentRouter | `https://agentrouter.org` | Primary target. Injects required User-Agent. |
+| Lumosel | `https://api.lumosel.vip` | Works out of the box. |
+| Aerolink | `https://capi.aerolink.lat` | Works out of the box. |
+| Any | `https://your-gateway.com` | Any Anthropic-compatible gateway. |
 
-Want the proxy to start automatically when you boot your computer?
+## Requirements
 
-<details>
-<summary><b>Windows</b></summary>
+- Python 3.8+ (standard library only, no `pip install`)
+- Claude Code v2.1.186+ (for `CLAUDE_CODE_RETRY_WATCHDOG`)
 
-1. Press `Win+R`, type `shell:startup`, press Enter
-2. Create a file `claude-shield.bat`:
-```batch
-@echo off
-start /min pythonw "%USERPROFILE%\.claude\retry-proxy.py" --start
-```
-</details>
+## Files
 
-<details>
-<summary><b>macOS / Linux</b></summary>
-
-```bash
-mkdir -p ~/.config/systemd/user/
-cp claude-proxy.service ~/.config/systemd/user/claude-shield.service
-systemctl --user enable --now claude-shield
-```
-</details>
-
----
-
-## 🐛 Troubleshooting
-
-| Problem | Solution |
+| File | Description |
 |:--|:--|
-| `Connection refused` | The proxy isn't running. Start it first: `python retry-proxy.py --start` |
-| Still crashing | Check if the proxy log shows `PASS permanent` - that means a real error (wrong model/auth), not a rate limit |
-| Frozen at 95% context | Update to the latest version. The circuit breaker prevents this |
-| Log shows `401` | Normal when testing with curl. Claude Code sends proper auth, the proxy forwards it |
+| `retry-proxy.py` | The proxy (single file, zero dependencies) |
+| `start-proxy.bat` | Windows auto-start script |
+| `start-proxy.sh` | macOS/Linux auto-start script |
+| `claude-proxy.service` | systemd service file |
+| `assets/logo.png` | Logo |
+| `assets/feature-403-429.png` | 403-to-429 conversion diagram |
 
-### Reading the logs
+## Privacy
 
-```
-[14:23:05] CONVERT 403 -> 429 | {"error":"用户额度不足..."}
-[14:23:25] 200
-```
+- No API keys stored. The proxy forwards what Claude Code sends.
+- No external dependencies. Pure Python standard library.
+- Local only. Listens on `127.0.0.1`, never exposes ports externally.
+- No telemetry. Zero network calls except forwarding to your configured gateway.
 
-- `CONVERT` = rate limit converted, Claude Code is retrying ✅
-- `PASS permanent` = real error, not retried ⚠️
-- `RETRY` = already retryable, forwarded ✅
-- `NETERR` = network error, converted to retry ✅
-- `200` = success ✅
+## License
 
----
-
-## 🌐 Supported Gateways
-
-Any Anthropic-compatible gateway:
-
-- ✅ AgentRouter
-- ✅ Lumosel
-- ✅ Aerolink
-- ✅ Kilo Gateway
-- ✅ Any custom gateway
-
----
-
-## 🔒 Privacy
-
-- **No API keys stored** in the proxy - it forwards what Claude Code sends
-- **No external dependencies** - pure Python, nothing to install
-- **Local only** - listens on `127.0.0.1`, never exposed externally
-- **No telemetry** - zero tracking
-
----
-
-## 📄 License
-
-MIT - use it, share it, modify it.
-
----
-
-<p align="center">Made with ⚡ by developers tired of restarting Claude Code</p>
+MIT
