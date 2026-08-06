@@ -81,23 +81,14 @@ class AnimState:
     stop_flag = False
     line_len = 0
 
-SHIELD_ART = r"""
-   ╔═══════════════════════════════════════╗
-   ║      ██████╗██╗      █████╗ ██████╗   ║
-   ║     ██╔════╝██║     ██╔══██╗██╔══██╗  ║
-   ║     ██║     ██║     ███████║██████╔╝  ║
-   ║     ██║     ██║     ██╔══██║██╔══██╗  ║
-   ║     ╚██████╗███████╗██║  ██║██║  ██║  ║
-   ║      ╚═════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝  ║
-   ║                                       ║
-   ║   ██╗  ██╗███████╗███████╗██╗   ██╗   ║
-   ║   ██║  ██║██╔════╝██╔════╝██║   ██║   ║
-   ║   ███████║█████╗  █████╗  ██║   ██║   ║
-   ║   ██╔══██║██╔══╝  ██╔══╝  ██║   ██║   ║
-   ║   ██║  ██║███████╗██║     ╚██████╔╝   ║
-   ║   ╚═╝  ╚═╝╚══════╝╚═╝      ╚═════╝    ║
-   ╚═══════════════════════════════════════╝
-"""
+SHIELD_ART = [
+    "  ██████╗██╗  ██╗██████╗  ██████╗ ███████╗██████╗  ██╗   ██╗███████╗",
+    " ██╔════╝██║  ██║██╔══██╗██╔═══██╗██╔════╝██╔══██╗██║   ██║██╔════╝",
+    " ██║     ███████║██████╔╝██║   ██║█████╗  ██████╔╝██║   ██║███████╗",
+    " ██║     ██╔══██║██╔══██╗██║   ██║██╔══╝  ██╔══██╗██║   ██║╚════██║",
+    " ╚██████╗██║  ██║██║  ██║╚██████╔╝███████╗██║  ██║╚██████╔╝███████║",
+    "  ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
+]
 
 SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
 SHIELD_FRAMES = ['🛡️','🛡️','🛡️','🛡️']
@@ -132,11 +123,25 @@ def animation_thread():
             ac = action_colors.get(AnimState.last_action, 'green')
             status = AnimState.last_status
 
-            # Build animated status line
-            status_text = f" {shield} {c(frame, 'cyan')} {rainbow_text('CLAUDESHIELD', offset)} {c(f'[{action_colors.get(AnimState.last_action,"green").upper()}]', ac)} "
+            # Build animated status line - rainbow spinner + rainbow text + rainbow bar
+            # Spinner in rainbow (cycles color per frame)
+            spinner_color = RAINBOW[AnimState.rainbow_offset % len(RAINBOW)]
+            spinner_str = f"\033[38;5;{spinner_color}m{frame}\033[0m"
+            
+            # CLAUDE orange + SHIELD rainbow
+            claude_str = f"\033[38;5;208mCLAUDE\033[0m"
+            shield_str = rainbow_text("SHIELD", offset)
+            
+            # Action label in its color
+            action_str = c(f"[{AnimState.last_action}]", ac)
+            
+            # Bar in rainbow
+            bar_str = rainbow_text(bar, offset + 5)
+            
+            status_text = f" {shield} {spinner_str} {claude_str}{shield_str} {action_str} "
             if status:
                 status_text += f"{c(str(status), 'bold')} "
-            status_text += f"{c(bar, 'green')} "
+            status_text += f"{bar_str} "
             status_text += f"{c('protecting...', 'dim')}"
 
             # Pad and overwrite
@@ -172,20 +177,29 @@ def stop_animation():
         AnimState.line_len = 0
 
 
+def orange_text(text):
+    """Color text in orange (256-color)."""
+    if _NO_COLOR:
+        return text
+    return f"\033[38;5;208m{text}\033[0m"
+
 def show_banner(upstream, host, port):
-    """Show rainbow ASCII art banner."""
-    # Rainbow shield art
-    for line in SHIELD_ART.split('\n'):
+    """Show CLAUDE (orange) + SHIELD (rainbow) ASCII art banner."""
+    # Split each line: first ~28 chars = CLAUDE (orange), rest = SHIELD (rainbow)
+    split_pos = 28
+    for line in SHIELD_ART:
         if line.strip():
-            print(rainbow_text(line, offset=int(time.time() * 10) % len(RAINBOW)))
+            claude_part = line[:split_pos]
+            shield_part = line[split_pos:]
+            print(f"  {orange_text(claude_part)}{rainbow_text(shield_part, offset=int(time.time()*8) % len(RAINBOW))}")
     
-    print(f"""
-  {c('v' + VERSION, 'dim')}  ·  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}
-  {c('Proxying to', 'dim')} {c(upstream, 'cyan')}
-
-  {c('🛡️  Shield active', 'green')}  {c('— Claude Code will auto-retry through outages', 'dim')}
-
-""")
+    print()
+    print(f"  {c('v' + VERSION, 'dim')}  ·  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}")
+    print(f"  {c('Proxying to', 'dim')} {c(upstream, 'cyan')}")
+    print()
+    print(f"  {c('🛡️  Shield active', 'green')}  {c('- Claude Code will auto-retry through outages', 'dim')}")
+    print(f"  {c('Press Ctrl+C to stop.', 'dim')}")
+    print()
     print(f"  {rainbow_text('● ● ● ● ● ● ● ● ● ●', offset=0)}")
     print()
 
