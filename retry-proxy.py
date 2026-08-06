@@ -46,7 +46,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "3.1.0"
+VERSION = "3.2.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
 _start_time = time.time()
@@ -846,6 +846,47 @@ def run_proxy(upstream, port=DEFAULT_PORT, host="127.0.0.1"):
         server.shutdown()
 
 
+def self_update():
+    """Download the latest retry-proxy.py from GitHub and replace this file."""
+    import urllib.request
+    import shutil
+
+    REPO = "brainstormersia-cmd/agentrouter-autoretry-claudecode"
+    URL = f"https://raw.githubusercontent.com/{REPO}/main/retry-proxy.py"
+    CURRENT = os.path.abspath(__file__)
+    TMP = CURRENT + ".new"
+
+    print(f"\n  {c('ClaudeShield Update', 'bold')}")
+    print(f"  Current version: {c('v' + VERSION, 'cyan')}")
+    print(f"  Downloading latest from GitHub...")
+
+    try:
+        urllib.request.urlretrieve(URL, TMP)
+        with open(TMP, 'r', encoding='utf-8') as f:
+            new_content = f.read()
+        if "retry-proxy.py" not in new_content and "ClaudeShield" not in new_content:
+            print(f"  {c('ERROR', 'red')}: downloaded file does not look like ClaudeShield. Aborting.")
+            os.remove(TMP)
+            return 1
+
+        # Backup current version
+        backup = CURRENT + ".bak"
+        shutil.copy2(CURRENT, backup)
+
+        # Replace
+        os.replace(TMP, CURRENT)
+        print(f"  {c('OK', 'green')}: updated to latest version.")
+        print(f"  Backup saved: {backup}")
+        print(f"\n  Restart the proxy to use the new version:")
+        print(f"    python \"{CURRENT}\" --start")
+        return 0
+    except Exception as e:
+        print(f"  {c('ERROR', 'red')}: {e}")
+        if os.path.exists(TMP):
+            os.remove(TMP)
+        return 1
+
+
 def main():
     args = sys.argv[1:]
 
@@ -856,6 +897,7 @@ def main():
         print(f"  Commands:")
         print(f"    {c('(none)', 'cyan')}      Interactive setup (recommended for new users)")
         print(f"    {c('--start', 'cyan')}     Start proxy with existing config")
+        print(f"    {c('--update', 'cyan')}    Update to latest version from GitHub")
         print(f"    {c('--upstream URL', 'cyan')}  Use a specific gateway")
         print(f"    {c('--port N', 'cyan')}    Use a specific port (default: {DEFAULT_PORT})")
         print(f"    {c('--version', 'cyan')}   Show version\n")
@@ -866,6 +908,9 @@ def main():
     if args[0] == "--version":
         print(f"ClaudeShield v{VERSION}")
         return
+
+    if args[0] == "--update":
+        sys.exit(self_update())
 
     if args[0] == "--start":
         # Start with default or configured upstream
