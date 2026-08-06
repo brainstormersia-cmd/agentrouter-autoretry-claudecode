@@ -257,6 +257,11 @@ def orange_text(text):
         return text
     return f"\033[38;2;255;165;0m{text}\033[0m"
 
+def dim_text(text):
+    if _NO_COLOR:
+        return text
+    return f"\033[2m{text}\033[0m"
+
 def show_banner(upstream, host, port):
     """Show CLAUDE (orange) + SHIELD (rainbow) ASCII art banner."""
     split_pos = 30
@@ -268,11 +273,14 @@ def show_banner(upstream, host, port):
             print(f"  {orange_text(claude_part)}{rainbow_text(shield_part, offset)}")
 
     print()
-    print(f"  {c('v' + VERSION, 'dim')}  -  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}")
-    print(f"  {c('Proxying to', 'dim')} {c(upstream, 'cyan')}")
+    print(f"  {dim_text('v' + VERSION)}  {c('|', 'dim')}  {c('listen', 'dim')} {c(f'http://{host}:{port}', 'bold')}"
+          f"  {c('|', 'dim')}  {c('upstream', 'dim')} {c(upstream, 'cyan')}")
     print()
-    print(f"  {c('[ Shield active ]', 'green')}  {c('Claude Code will auto-retry through outages', 'dim')}")
-    print(f"  {c('Press Ctrl+C to stop.', 'dim')}")
+    print(f"  {c('[*]', 'green')}  {c('Shield active', 'green')}  {c('Claude Code will auto-retry through outages', 'dim')}")
+    print(f"  {c('[?]', 'dim')}  {c('Stats: http://{host}:{port}/stats', 'dim')}")
+    print(f"  {c('[!]', 'yellow')}  {c('Ctrl+C to stop', 'dim')}")
+    print()
+    print(f"  {rainbow_text('* * * * * * * * * *', offset=0)}")
     print()
     print(f"  {rainbow_text('* * * * * * * * * *', offset=0)}")
     print()
