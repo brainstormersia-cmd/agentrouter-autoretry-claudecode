@@ -46,9 +46,21 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "2.1.0"
+VERSION = "3.1.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
+_start_time = time.time()
+
+
+def _format_uptime(seconds):
+    """Format uptime as human-readable string."""
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds/60)}m {int(seconds%60)}s"
+    hours = int(seconds / 3600)
+    minutes = int((seconds % 3600) / 60)
+    return f"{hours}h {minutes}m"
 
 # Known gateways
 GATEWAYS = [
@@ -283,7 +295,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
     UPSTREAM_PORT = 443
     USE_TLS = True
 
-    def do_GET(self):    self._handle("GET")
+    def do_GET(self):
+        # Built-in stats endpoint for status page
+        if self.path == '/stats' or self.path == '/stats/':
+            self._send_stats()
+            return
+        if self.path == '/health' or self.path == '/health/':
+            self._send_health()
+            return
+        self._handle("GET")
+
+    def _send_stats(self):
+        """Expose proxy stats as JSON for the status page."""
+        uptime = time.time() - _start_time
+        stats_json = json.dumps({
+            "version": VERSION,
+            "upstream": f"https://{Handler.UPSTREAM_HOST}",
+            "uptime_seconds": round(uptime, 1),
+            "uptime_human": _format_uptime(uptime),
+            "requests": Stats.requests,
+            "converted": Stats.converted,
+            "passed": Stats.passed,
+            "errors": Stats.errors,
+            "retry_rate": round(Stats.converted / max(1, Stats.requests), 4),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', str(len(stats_json)))
+        self.end_headers()
+        self.wfile.write(stats_json)
+
+    def _send_health(self):
+        """Simple health check endpoint."""
+        health = json.dumps({"status": "ok", "version": VERSION}).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Content-Length', str(len(health)))
+        self.end_headers()
+        self.wfile.write(health)
+
     def do_POST(self):  self._handle("POST")
     def do_HEAD(self):  self._handle("HEAD")
     def do_PUT(self):    self._handle("PUT")
