@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 ClaudeShield - Never let Claude Code crash on gateway rate limits again.
 
@@ -46,7 +46,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "3.2.0"
+VERSION = "3.3.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
 _start_time = time.time()
@@ -70,9 +70,9 @@ GATEWAYS = [
 ]
 
 
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  RAINBOW ANIMATION ENGINE
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _supports_color():
     """Detect if the terminal supports ANSI 256-color output.
@@ -287,9 +287,9 @@ def show_banner(upstream, host, port):
 
 
 
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  PROXY
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 class Stats:
     requests = 0
@@ -830,7 +830,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         text = body.decode('utf-8', errors='replace').lower()
 
         # Permanent errors: don't retry (prevents infinite loops)
-        permanent = ['无权访问模型','not authorized to access','model not found',
+        permanent = ['æ— æƒè®¿é—®æ¨¡åž‹','not authorized to access','model not found',
                      'invalid model','unknown model','model does not exist',
                      'unauthorized','invalid_api_key','authentication']
         if any(kw in text for kw in permanent) and status in (400,401,403,404):
@@ -845,7 +845,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     'busy','retry','temporarily','maintenance','degraded',
                     'restricted','insufficient','balance','exceeded','exhausted',
                     'saturated','gateway','downstream','upstream','origin',
-                    '额度','不足','余额','限制','超额','耗尽']
+                    'é¢åº¦','ä¸è¶³','ä½™é¢','é™åˆ¶','è¶…é¢','è€—å°½']
         is_retry = (any(kw in text for kw in retry_kw) or
                     status in (429,500,502,503,504,505,510,511,
                                520,521,522,523,524,525,526,527,529,530))
@@ -917,9 +917,9 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 #  INTERACTIVE SETUP
-# ═══════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def interactive_setup():
     """Guide the user through setup with simple questions."""
@@ -1049,7 +1049,7 @@ def run_proxy(upstream, port=DEFAULT_PORT, host="127.0.0.1"):
     anim = threading.Thread(target=animation_thread, daemon=True)
     anim.start()
 
-    print(f"  {c('🛡️  Shield active', 'green')}  {c('- Claude Code will auto-retry through outages', 'dim')}")
+    print(f"  {c('ðŸ›¡ï¸  Shield active', 'green')}  {c('- Claude Code will auto-retry through outages', 'dim')}")
     print(f"  {c('Press Ctrl+C to stop.', 'dim')}\n")
 
     server = Server((host, port), Handler)
