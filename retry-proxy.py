@@ -431,6 +431,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         trigger_animation('NETERR', 503)
                         self._send_503("Gateway returned non-JSON response. Retrying.")
                         return
+                    # JSON body that starts with { but IS an error payload.
+                    # Anthropic error format: {"type":"error","error":{...}}
+                    # Claude Code expects a message response on 200 - an error
+                    # body means the gateway lied about the status.
+                    if stripped[:1] == b'{':
+                        body_lower = stripped[:512].lower()
+                        if b'"type":"error"' in body_lower or b'"type": "error"' in body_lower:
+                            Stats.errors += 1
+                            self.log(f"[{rid}] {c('JSON_ERR','red')} 200 JSON-error body -> 503 | {stripped[:100]!r}")
+                            trigger_animation('NETERR', 503)
+                            self._send_503("Gateway returned error body with 200 status. Retrying.")
+                            return
                 self._send(status, rbody, rheaders)
         except (http.client.HTTPException, ConnectionError, TimeoutError, OSError) as e:
             Stats.errors += 1
@@ -516,6 +528,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
+                    break
+                # Check each chunk for errors hidden mid-stream
+                # (gateways sometimes send message_start ok, then an error event)
+                if self._sse_contains_error(chunk.decode('utf-8', errors='replace')[:2048]):
+                    Stats.errors += 1
+                    self.log(f"[{rid}] {c('SSE_MID_ERR','red')} error mid-stream -> abort")
+                    trigger_animation('NETERR', 503)
+                    # Send a final error event so the client knows the stream is dead
+                    try:
+                        err_event = b'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Gateway error mid-stream. Retry."}}\n\n'
+                        self.wfile.write(err_event)
+                        self.wfile.flush()
+                    except Exception:
+                        pass
                     break
                 filtered = self._filter_null_events(chunk)
                 self.wfile.write(filtered)
