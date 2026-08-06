@@ -46,10 +46,41 @@ GATEWAYS = [
 #  RAINBOW ANIMATION ENGINE
 # ═══════════════════════════════════════════════════════════════
 
-_NO_COLOR = sys.platform == 'win32' and not os.environ.get('WT_SESSION') and not os.environ.get('TERM')
+def _supports_color():
+    """Detect if the terminal supports ANSI 256-color output."""
+    if sys.platform != 'win32':
+        return True
+    # Windows Terminal, VS Code terminal, PowerShell 7+
+    if os.environ.get('WT_SESSION'):
+        return True
+    if os.environ.get('TERM_PROGRAM') in ('vscode', 'Windows Terminal'):
+        return True
+    if os.environ.get('PSVersion'):
+        try:
+            major = int(os.environ['PSVersion'].split('.')[0])
+            if major >= 7:
+                return True
+        except (ValueError, IndexError):
+            pass
+    # Check for Windows Terminal via the ConEmu hack
+    if os.environ.get('ConEmuANSI') == 'ON':
+        return True
+    # Default: Windows PowerShell 5.1 does NOT support 256-color
+    return False
+
+_NO_COLOR = not _supports_color()
+
+# Fallback basic colors for terminals without 256-color support
+BASIC_COLORS = {
+    'red': '\033[91m', 'green': '\033[92m', 'yellow': '\033[93m',
+    'cyan': '\033[96m', 'magenta': '\033[95m', 'blue': '\033[94m',
+}
 
 # 256-color rainbow palette
 RAINBOW = [196, 202, 208, 214, 220, 226, 190, 154, 118, 82, 46, 47, 48, 49, 50, 51, 45, 39, 33, 27, 21, 57, 93, 129, 165, 201]
+
+# Basic (8-color) rainbow for fallback terminals
+RAINBOW_BASIC = ['91', '93', '92', '96', '94', '95']
 
 def rainbow_text(text, offset=0):
     """Color text with cycling rainbow colors."""
@@ -231,14 +262,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
         Stats.requests += 1
         rid = Stats.requests
         length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(length) if length > 0 else None
+        raw_body = self.rfile.read(length) if length > 0 else None
 
+        # Inject Claude Code CLI User-Agent - AgentRouter rejects other clients
         headers = {}
         for k, v in self.headers.items():
             if k.lower() not in ('host','content-length','connection',
-                                 'transfer-encoding','accept-encoding'):
+                                 'transfer-encoding','accept-encoding',
+                                 'user-agent'):
                 headers[k] = v
         headers['Accept-Encoding'] = 'identity'
+
+        # Pick the right User-Agent: real Claude Code UA if present, else inject
+        orig_ua = (self.headers.get('User-Agent') or '').strip()
+        if orig_ua.lower().startswith(('claude-cli/', 'claude-code/')):
+            headers['User-Agent'] = orig_ua
+        else:
+            headers['User-Agent'] = 'claude-cli/1.0.0 (external, cli)'
+
+        # Force stream=true and parse body for payload sanitization
+        body = raw_body
+        is_streamed = False
+        if raw_body and method == 'POST':
+            try:
+                text = raw_body.decode('utf-8', errors='replace')
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    is_streamed = parsed.get('stream', False) is True
+                    parsed['stream'] = True  # always force stream upstream
+                    # Remove params some gateways reject
+                    parsed.pop('temperature', None)
+                    parsed.pop('top_p', None)
+                    body = json.dumps(parsed).encode()
+                    headers['Content-Length'] = str(len(body))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
 
         if self.USE_TLS:
             ctx = ssl.create_default_context()
@@ -260,27 +318,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._on_error(status, rbody, rheaders, rid)
                 return
 
-            is_stream = 'text/event-stream' in (resp.getheader('Content-Type') or '')
+            content_type = (resp.getheader('Content-Type') or '').lower()
+            is_stream = 'text/event-stream' in content_type or is_streamed
             if is_stream:
-                self._stream(resp, status, rheaders)
+                self._stream_with_peek(resp, status, rheaders, rid, is_streamed)
             else:
                 rbody = resp.read()
-                # Catch empty/malformed 200 responses (gateway returns 200 with
-                # empty body or non-JSON -> Claude Code crashes "malformed response")
-                content_type = (resp.getheader('Content-Type') or '').lower()
-                looks_json = 'json' in content_type or 'text' in content_type or not content_type
-                if status == 200 and looks_json:
+                # Catch empty/malformed 200 responses
+                if status == 200:
                     stripped = rbody.strip()
                     if len(stripped) == 0:
-                        # Empty body on 200 -> convert to 503 retryable
                         Stats.errors += 1
-                        self.log(f"[{rid}] {c('EMPTY200','red')} 200 empty body -> 503")
+                        self.log(f"[{rid}] {c('EMPTY200','red')} 200 empty -> 503")
                         trigger_animation('NETERR', 503)
                         self._send_503("Gateway returned empty response. Retrying.")
                         return
-                    if stripped[:1] not in (b'{', b'[', b'<', b'd', b'a', b'f', b't', b'n'):
-                        # Non-JSON body on a JSON endpoint -> likely an HTML error page
-                        # masked as 200. Convert to 503 retryable.
+                    if stripped[:1] not in (b'{', b'['):
                         Stats.errors += 1
                         self.log(f"[{rid}] {c('MALFORMED','red')} 200 non-JSON -> 503 | {stripped[:80]!r}")
                         trigger_animation('NETERR', 503)
@@ -317,7 +370,108 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _stream_with_peek(self, resp, status, headers, rid, was_streamed):
+        """Stream SSE response, but peek at the first chunk to detect errors
+        hidden inside a 200 status. This fixes 'empty or malformed response'.
+
+        AgentRouter sometimes returns HTTP 200 + SSE stream where the first
+        event is an error (rate_limit, quota, etc.) instead of message_start.
+        We detect this and convert to a retryable error.
+        """
+        peeked = b''
+        sample_text = ''
+        try:
+            peeked = resp.read(8192)
+            sample_text = peeked.decode('utf-8', errors='replace')[:2048]
+        except Exception:
+            pass
+
+        # Check if the peeked data contains an error (even on 200)
+        if self._sse_contains_error(sample_text):
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('SSE_ERR','red')} 200 stream has error -> 503 | {sample_text[:100]}")
+            trigger_animation('NETERR', 503)
+            self._send_503("Gateway returned error in stream. Retrying.")
+            return
+
+        # Check if stream has no message_start event (empty/malformed)
+        if was_streamed and 'message_start' not in sample_text and len(peeked) > 0:
+            # Could be error JSON disguised as 200
+            if '"type":"error"' in sample_text or '"error":' in sample_text:
+                Stats.errors += 1
+                self.log(f"[{rid}] {c('SSE_NO_START','red')} 200 no message_start -> 503")
+                trigger_animation('NETERR', 503)
+                self._send_503("Stream ended before message_start. Retrying.")
+                return
+
+        # Stream is good - send headers then peeked data + rest
+        self.send_response(status)
+        for k, v in headers:
+            if k.lower() not in ('transfer-encoding','connection',
+                                 'content-length','content-encoding'):
+                self.send_header(k, v)
+        self.send_header('Connection', 'close')
+        self.end_headers()
+
+        try:
+            # Send the peeked data first
+            if peeked:
+                # Filter out 'data: null' events that break Anthropic parsers
+                filtered = self._filter_null_events(peeked)
+                self.wfile.write(filtered)
+                self.wfile.flush()
+            # Then stream the rest
+            while True:
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                filtered = self._filter_null_events(chunk)
+                self.wfile.write(filtered)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+
+    @staticmethod
+    def _sse_contains_error(text: str) -> bool:
+        """Detect if an SSE stream chunk contains an error payload."""
+        if not text:
+            return False
+        lower = text.lower()
+        error_markers = [
+            '"type":"error"',
+            '"type": "error"',
+            'rate_limit',
+            'chatratelimited',
+            'upstream_provider_rate_limit',
+            'server_is_overloaded',
+            'service_unavailable_error',
+            '用户额度不足',
+            '剩余额度',
+            '无权访问模型',
+        ]
+        return any(m.lower() in lower for m in error_markers)
+
+    @staticmethod
+    def _filter_null_events(data: bytes) -> bytes:
+        """Remove 'data: null' SSE events that break Anthropic parsers."""
+        text = data.decode('utf-8', errors='replace')
+        lines = text.split('\n')
+        filtered = []
+        skip_next_blank = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == 'data: null' or stripped == 'data:null':
+                skip_next_blank = True
+                continue
+            if skip_next_blank and stripped == '':
+                skip_next_blank = False
+                continue
+            skip_next_blank = False
+            filtered.append(line)
+        return '\n'.join(filtered).encode()
+
     def _stream(self, resp, status, headers):
+        """Legacy stream passthrough (kept for non-Anthropic endpoints)."""
         self.send_response(status)
         for k, v in headers:
             if k.lower() not in ('transfer-encoding','connection',
