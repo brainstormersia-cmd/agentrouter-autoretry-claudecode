@@ -375,12 +375,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Force stream=true and parse body for payload sanitization
         body = raw_body
         is_streamed = False
+        wants_stream = False
+        is_messages_route = self.path.startswith('/v1/messages')
         if raw_body and method == 'POST':
             try:
                 text = raw_body.decode('utf-8', errors='replace')
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
                     is_streamed = parsed.get('stream', False) is True
+                    wants_stream = is_streamed  # what the CLIENT asked for
                     parsed['stream'] = True  # always force stream upstream
                     # Remove params some gateways reject
                     parsed.pop('temperature', None)
@@ -413,7 +416,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             content_type = (resp.getheader('Content-Type') or '').lower()
             is_stream = 'text/event-stream' in content_type or is_streamed
             if is_stream:
-                self._stream_with_peek(resp, status, rheaders, rid, is_streamed)
+                if wants_stream:
+                    self._stream_with_peek(resp, status, rheaders, rid, is_streamed)
+                else:
+                    # Client asked for stream:false but upstream (forced) streams.
+                    # Fold the SSE back into a single JSON response - otherwise
+                    # the client sees SSE where it expects JSON and reports
+                    # "empty or malformed response (HTTP 200)".
+                    self._collect_json(resp, status, rheaders, rid, is_messages_route)
             else:
                 rbody = resp.read()
                 # Catch empty/malformed 200 responses
@@ -475,40 +485,50 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _stream_with_peek(self, resp, status, headers, rid, was_streamed):
-        """Stream SSE response, but peek at the first chunk to detect errors
-        hidden inside a 200 status. This fixes 'empty or malformed response'.
+        """Stream SSE response, but peek at the first COMPLETE events to detect
+        errors hidden inside a 200 status.
 
-        AgentRouter sometimes returns HTTP 200 + SSE stream where the first
-        event is an error (rate_limit, quota, etc.) instead of message_start.
-        We detect this and convert to a retryable error.
+        Like arproxy: accumulate until a full SSE event boundary (\\n\\n)
+        before deciding. A partial chunk must never trigger a false abort.
+
+        Rules (mirroring arproxy):
+        - error event (parsed JSON type:error or has error field) -> 503 retry
+        - no message_start in first events -> 503 retry
+        - otherwise stream through, filtering data: null
         """
-        peeked = b''
-        sample_text = ''
+        # Peek: accumulate bytes until at least one complete SSE event
+        buffer = b''
         try:
-            peeked = resp.read(8192)
-            sample_text = peeked.decode('utf-8', errors='replace')[:2048]
+            while len(buffer) < 65536:  # safety cap
+                chunk = resp.read(4096)
+                if not chunk:
+                    break
+                buffer += chunk
+                # Stop when we have at least one full event (double newline)
+                if b'\n\n' in buffer:
+                    break
         except Exception:
             pass
 
-        # Check if the peeked data contains an error (even on 200)
-        if self._sse_contains_error(sample_text):
+        text = buffer.decode('utf-8', errors='replace')
+
+        # Real error payload in the stream head?
+        if self._sse_contains_error(text):
             Stats.errors += 1
-            self.log(f"[{rid}] {c('SSE_ERR','red')} 200 stream has error -> 503 | {sample_text[:100]}")
+            self.log(f"[{rid}] {c('SSE_ERR','red')} 200 stream has error -> 503")
             trigger_animation('NETERR', 503)
             self._send_503("Gateway returned error in stream. Retrying.")
             return
 
-        # Check if stream has no message_start event (empty/malformed)
-        if was_streamed and 'message_start' not in sample_text and len(peeked) > 0:
-            # Could be error JSON disguised as 200
-            if '"type":"error"' in sample_text or '"error":' in sample_text:
-                Stats.errors += 1
-                self.log(f"[{rid}] {c('SSE_NO_START','red')} 200 no message_start -> 503")
-                trigger_animation('NETERR', 503)
-                self._send_503("Stream ended before message_start. Retrying.")
-                return
+        # No message_start in the first complete events -> malformed stream
+        if was_streamed and 'message_start' not in text and text.strip():
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('SSE_NO_START','red')} 200 no message_start -> 503")
+            trigger_animation('NETERR', 503)
+            self._send_503("Stream ended before message_start. Retrying.")
+            return
 
-        # Stream is good - send headers then peeked data + rest
+        # Stream is good - send headers then buffered data + rest
         self.send_response(status)
         for k, v in headers:
             if k.lower() not in ('transfer-encoding','connection',
@@ -518,56 +538,256 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            # Send the peeked data first
-            if peeked:
-                # Filter out 'data: null' events that break Anthropic parsers
-                filtered = self._filter_null_events(peeked)
-                self.wfile.write(filtered)
+            # Send buffered data first (filtering data: null)
+            if buffer:
+                self.wfile.write(self._filter_null_events(buffer))
                 self.wfile.flush()
-            # Then stream the rest
+            # Then stream the rest - NO mid-stream error killing.
+            # A model may legitimately mention error words in its output;
+            # only event-level filtering happens below.
             while True:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
-                # Check each chunk for errors hidden mid-stream
-                # (gateways sometimes send message_start ok, then an error event)
-                if self._sse_contains_error(chunk.decode('utf-8', errors='replace')[:2048]):
-                    Stats.errors += 1
-                    self.log(f"[{rid}] {c('SSE_MID_ERR','red')} error mid-stream -> abort")
-                    trigger_animation('NETERR', 503)
-                    # Send a final error event so the client knows the stream is dead
-                    try:
-                        err_event = b'event: error\ndata: {"type":"error","error":{"type":"api_error","message":"Gateway error mid-stream. Retry."}}\n\n'
-                        self.wfile.write(err_event)
-                        self.wfile.flush()
-                    except Exception:
-                        pass
-                    break
-                filtered = self._filter_null_events(chunk)
-                self.wfile.write(filtered)
+                self.wfile.write(self._filter_null_events(chunk))
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
+    def _collect_json(self, resp, status, headers, rid, is_messages_route):
+        """Fold a forced-stream SSE response back into a single JSON body.
+
+        Called when the CLIENT asked for stream:false but the upstream was
+        forced to stream. Returning SSE to a JSON-expecting client causes
+        'empty or malformed response (HTTP 200)'.
+
+        For /v1/messages: rebuild the Anthropic message object.
+        For /v1/chat/completions: rebuild the chat.completion object.
+        """
+        try:
+            raw = resp.read()
+        except Exception as e:
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('COLLECT_ERR','red')} read failed: {e}")
+            self._send_503("Gateway read error. Retrying.")
+            return
+
+        text = raw.decode('utf-8', errors='replace')
+        if not text.strip():
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('EMPTY200','red')} 200 empty body -> 503")
+            trigger_animation('NETERR', 503)
+            self._send_503("Gateway returned empty response. Retrying.")
+            return
+
+        if self._sse_contains_error(text):
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('SSE_ERR','red')} stream has error -> 503")
+            trigger_animation('NETERR', 503)
+            self._send_503("Gateway returned error in stream. Retrying.")
+            return
+
+        # If it's not actually SSE (gateway ignored stream:true), pass raw JSON
+        if text.strip()[:1] in ('{', '['):
+            self._send(status, raw, headers)
+            return
+
+        events = self._parse_sse_events(text)
+        if not events:
+            Stats.errors += 1
+            # Debug: show what the gateway actually returned
+            self.log(f"[{rid}] {c('SSE_NO_START','red')} no parseable events -> 503 | body: {text[:200]!r}")
+            trigger_animation('NETERR', 503)
+            self._send_503("Stream had no parseable events. Retrying.")
+            return
+
+        if is_messages_route:
+            out = self._fold_anthropic_message(events)
+        else:
+            out = self._fold_openai_completion(events)
+
+        if out is None:
+            Stats.errors += 1
+            self.log(f"[{rid}] {c('FOLD_ERR','red')} could not fold stream -> 503")
+            trigger_animation('NETERR', 503)
+            self._send_503("Could not reconstruct response. Retrying.")
+            return
+
+        body = json.dumps(out).encode()
+        # Send as JSON with the upstream status
+        self.send_response(status)
+        for k, v in headers:
+            if k.lower() not in ('transfer-encoding','connection',
+                                 'content-length','content-encoding'):
+                self.send_header(k, v)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(body)
+
+    @staticmethod
+    def _parse_sse_events(text: str) -> list[dict]:
+        """Extract JSON objects from SSE data: lines."""
+        events = []
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == '[DONE]':
+                continue
+            try:
+                obj = json.loads(payload)
+                if isinstance(obj, dict):
+                    events.append(obj)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return events
+
+    def _fold_anthropic_message(self, events: list[dict]):
+        """Rebuild a single Anthropic message object from SSE events."""
+        message = None
+        blocks: dict[int, dict] = {}
+        stop_reason = None
+        stop_sequence = None
+        usage = None
+
+        for ev in events:
+            etype = ev.get('type')
+            if etype == 'message_start':
+                message = dict(ev.get('message') or {})
+                usage = dict(ev.get('message', {}).get('usage') or {})
+            elif etype == 'content_block_start':
+                idx = ev.get('index', len(blocks))
+                block = dict(ev.get('content_block') or {})
+                if block.get('type') == 'tool_use' and 'input' not in block:
+                    block['input'] = ''
+                blocks[idx] = block
+            elif etype == 'content_block_delta':
+                idx = ev.get('index', 0)
+                block = blocks.setdefault(idx, {'type': 'text', 'text': ''})
+                delta = ev.get('delta') or {}
+                if isinstance(delta.get('text'), str):
+                    block['text'] = block.get('text', '') + delta['text']
+                if isinstance(delta.get('partial_json'), str):
+                    block['input'] = block.get('input', '') + delta['partial_json']
+                if isinstance(delta.get('thinking'), str):
+                    block['thinking'] = block.get('thinking', '') + delta['thinking']
+                if isinstance(delta.get('signature'), str):
+                    block['signature'] = delta['signature']
+            elif etype == 'message_delta':
+                if ev.get('delta'):
+                    if ev['delta'].get('stop_reason') is not None:
+                        stop_reason = ev['delta']['stop_reason']
+                    if ev['delta'].get('stop_sequence') is not None:
+                        stop_sequence = ev['delta']['stop_sequence']
+                if ev.get('usage'):
+                    usage = {**(usage or {}), **ev['usage']}
+            elif etype == 'error':
+                return None
+
+        if not message:
+            return None
+
+        content = []
+        for idx in sorted(blocks):
+            block = blocks[idx]
+            if block.get('type') == 'tool_use' and isinstance(block.get('input'), str):
+                try:
+                    block['input'] = json.loads(block['input']) if block['input'] else {}
+                except json.JSONDecodeError:
+                    block['input'] = {}
+            content.append(block)
+
+        message['type'] = 'message'
+        message.setdefault('role', 'assistant')
+        message['content'] = content
+        message['stop_reason'] = stop_reason or message.get('stop_reason') or 'end_turn'
+        message['stop_sequence'] = stop_sequence if stop_sequence is not None else message.get('stop_sequence')
+        if usage:
+            message['usage'] = usage
+        return message
+
+    def _fold_openai_completion(self, events: list[dict]):
+        """Rebuild a single chat.completion object from SSE events."""
+        accum_text = ''
+        calls: dict[int, dict] = {}
+        stop_reason = 'stop'
+        seq_id = 'chatcmpl-proxy'
+        model = ''
+
+        for ev in events:
+            if ev.get('id'):
+                seq_id = ev['id']
+            if ev.get('model'):
+                model = ev['model']
+            if ev.get('type') == 'content_block_delta' and ev.get('delta', {}).get('text'):
+                accum_text += ev['delta']['text']
+            for choice in ev.get('choices') or []:
+                if choice.get('finish_reason'):
+                    stop_reason = choice['finish_reason']
+                delta = choice.get('delta') or {}
+                if delta.get('content'):
+                    accum_text += delta['content']
+                for tc in delta.get('tool_calls') or []:
+                    idx = tc.get('index', 0)
+                    call = calls.setdefault(idx, {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}})
+                    if tc.get('id'):
+                        call['id'] = tc['id']
+                    if tc.get('function', {}).get('name'):
+                        call['function']['name'] += tc['function']['name']
+                    if tc.get('function', {}).get('arguments'):
+                        call['function']['arguments'] += tc['function']['arguments']
+
+        msg = {'role': 'assistant'}
+        if accum_text or not calls:
+            msg['content'] = accum_text
+        if calls:
+            msg['tool_calls'] = list(calls.values())
+
+        return {
+            'id': seq_id,
+            'object': 'chat.completion',
+            'created': int(time.time()),
+            'model': model,
+            'choices': [{'index': 0, 'message': msg, 'finish_reason': stop_reason}],
+        }
+
     @staticmethod
     def _sse_contains_error(text: str) -> bool:
-        """Detect if an SSE stream chunk contains an error payload."""
+        """Detect if an SSE stream chunk contains an error payload.
+
+        Parses data: lines as JSON - only REAL error payloads match.
+        Never matches model content that merely mentions words like
+        'rate_limit' (the false-positive bug in earlier versions).
+        """
         if not text:
             return False
-        lower = text.lower()
-        error_markers = [
-            '"type":"error"',
-            '"type": "error"',
-            'rate_limit',
-            'chatratelimited',
-            'upstream_provider_rate_limit',
-            'server_is_overloaded',
-            'service_unavailable_error',
-            '用户额度不足',
-            '剩余额度',
-            '无权访问模型',
-        ]
-        return any(m.lower() in lower for m in error_markers)
+
+        # Check every data: line by parsing it as JSON (like arproxy)
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == '[DONE]':
+                continue
+            try:
+                obj = json.loads(payload)
+                if not isinstance(obj, dict):
+                    continue
+                # Real error: type == "error", OR an error field that is
+                # actually populated. Legitimate events carry "error": null,
+                # so a bare 'error' key must NOT count as an error.
+                if obj.get('type') == 'error':
+                    return True
+                err_val = obj.get('error')
+                if err_val is not None and err_val != {} and err_val != []:
+                    return True
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return False
 
     @staticmethod
     def _filter_null_events(data: bytes) -> bytes:
