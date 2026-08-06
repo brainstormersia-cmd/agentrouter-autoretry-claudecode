@@ -30,6 +30,22 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
+    # Enable Windows Virtual Terminal Processing so ANSI escape codes work
+    # even in legacy Windows PowerShell 5.1 (conhost). This is what rich/colorama do.
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+
+        # STD_OUTPUT_HANDLE = -11, STD_ERROR_HANDLE = -12
+        for handle_id in (-11, -12):
+            handle = kernel32.GetStdHandle(handle_id)
+            mode = ctypes.c_uint32()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        pass
+
 VERSION = "2.1.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
@@ -47,26 +63,15 @@ GATEWAYS = [
 # ═══════════════════════════════════════════════════════════════
 
 def _supports_color():
-    """Detect if the terminal supports ANSI 256-color output."""
-    if sys.platform != 'win32':
-        return True
-    # Windows Terminal, VS Code terminal, PowerShell 7+
-    if os.environ.get('WT_SESSION'):
-        return True
-    if os.environ.get('TERM_PROGRAM') in ('vscode', 'Windows Terminal'):
-        return True
-    if os.environ.get('PSVersion'):
-        try:
-            major = int(os.environ['PSVersion'].split('.')[0])
-            if major >= 7:
-                return True
-        except (ValueError, IndexError):
-            pass
-    # Check for Windows Terminal via the ConEmu hack
-    if os.environ.get('ConEmuANSI') == 'ON':
-        return True
-    # Default: Windows PowerShell 5.1 does NOT support 256-color
-    return False
+    """Detect if the terminal supports ANSI 256-color output.
+
+    On Windows we enable Virtual Terminal Processing via the kernel32
+    API at startup, so ANSI codes work even in PowerShell 5.1.
+    """
+    if sys.platform == 'win32':
+        return True  # VT processing enabled at module load
+    # Unix: check TERM
+    return bool(os.environ.get('TERM'))
 
 _NO_COLOR = not _supports_color()
 
