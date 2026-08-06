@@ -18,10 +18,11 @@ import os
 import sys
 import socketserver
 import ssl
+import threading
 import time
 from urllib.parse import urlparse
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM = "https://agentrouter.org"
 
@@ -32,14 +33,154 @@ GATEWAYS = [
     ("Aerolink",    "https://capi.aerolink.lat", "claude-opus-4-8"),
 ]
 
-# ANSI colors
+
+# ═══════════════════════════════════════════════════════════════
+#  RAINBOW ANIMATION ENGINE
+# ═══════════════════════════════════════════════════════════════
+
 _NO_COLOR = sys.platform == 'win32' and not os.environ.get('WT_SESSION') and not os.environ.get('TERM')
+
+# 256-color rainbow palette
+RAINBOW = [196, 202, 208, 214, 220, 226, 190, 154, 118, 82, 46, 47, 48, 49, 50, 51, 45, 39, 33, 27, 21, 57, 93, 129, 165, 201]
+
+def rainbow_text(text, offset=0):
+    """Color text with cycling rainbow colors."""
+    if _NO_COLOR:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        if ch == ' ':
+            result.append(ch)
+        else:
+            color = RAINBOW[(i + offset) % len(RAINBOW)]
+            result.append(f"\033[38;5;{color}m{ch}\033[0m")
+    return ''.join(result)
+
 def c(text, color):
     if _NO_COLOR:
         return text
     colors = {'green':'\033[92m','red':'\033[91m','yellow':'\033[93m',
               'cyan':'\033[96m','bold':'\033[1m','dim':'\033[2m','reset':'\033[0m'}
     return f"{colors.get(color,'')}{text}{colors['reset']}"
+
+# Animation state
+class AnimState:
+    active = False        # True when proxy is converting/retrying
+    last_action = ""      # "CONVERT", "RETRY", "NETERR", "PASS", "OK"
+    last_status = 0
+    spinner_frame = 0
+    rainbow_offset = 0
+    stop_flag = False
+    line_len = 0
+
+SHIELD_ART = r"""
+   ╔═══════════════════════════════════════╗
+   ║      ██████╗██╗      █████╗ ██████╗   ║
+   ║     ██╔════╝██║     ██╔══██╗██╔══██╗  ║
+   ║     ██║     ██║     ███████║██████╔╝  ║
+   ║     ██║     ██║     ██╔══██║██╔══██╗  ║
+   ║     ╚██████╗███████╗██║  ██║██║  ██║  ║
+   ║      ╚═════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝  ║
+   ║                                       ║
+   ║   ██╗  ██╗███████╗███████╗██╗   ██╗   ║
+   ║   ██║  ██║██╔════╝██╔════╝██║   ██║   ║
+   ║   ███████║█████╗  █████╗  ██║   ██║   ║
+   ║   ██╔══██║██╔══╝  ██╔══╝  ██║   ██║   ║
+   ║   ██║  ██║███████╗██║     ╚██████╔╝   ║
+   ║   ╚═╝  ╚═╝╚══════╝╚═╝      ╚═════╝    ║
+   ╚═══════════════════════════════════════╝
+"""
+
+SPINNER = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏']
+SHIELD_FRAMES = ['🛡️','🛡️','🛡️','🛡️']
+BAR_FRAMES = [
+    '▁▁▁▁▁▁▁▁▁▁▁',
+    '▁▁▂▂▃▃▄▄▅▅▆',
+    '▂▂▃▃▄▄▅▅▆▆▇',
+    '▃▃▄▄▅▅▆▆▇▇█',
+    '▄▅▆▇█▇▆▅▄▃▂',
+    '▅▆▇█▇▆▅▄▃▂▁',
+    '▆▇█▇▆▅▄▃▂▁▁',
+    '▇█▇▆▅▄▃▂▁▁▁',
+]
+
+
+def animation_thread():
+    """Background animation that shows status when proxy is active."""
+    while not AnimState.stop_flag:
+        if AnimState.active:
+            frame = SPINNER[AnimState.spinner_frame % len(SPINNER)]
+            bar = BAR_FRAMES[AnimState.spinner_frame % len(BAR_FRAMES)]
+            shield = SHIELD_FRAMES[AnimState.spinner_frame % len(SHIELD_FRAMES)]
+            offset = AnimState.rainbow_offset
+
+            action_colors = {
+                'CONVERT': 'cyan',
+                'RETRY': 'yellow',
+                'NETERR': 'red',
+                'PASS': 'dim',
+                'OK': 'green',
+            }
+            ac = action_colors.get(AnimState.last_action, 'green')
+            status = AnimState.last_status
+
+            # Build animated status line
+            status_text = f" {shield} {c(frame, 'cyan')} {rainbow_text('CLAUDESHIELD', offset)} {c(f'[{action_colors.get(AnimState.last_action,"green").upper()}]', ac)} "
+            if status:
+                status_text += f"{c(str(status), 'bold')} "
+            status_text += f"{c(bar, 'green')} "
+            status_text += f"{c('protecting...', 'dim')}"
+
+            # Pad and overwrite
+            pad = max(0, AnimState.line_len - len(status_text))
+            sys.stderr.write(f"\r\033[K{status_text}{' ' * pad}")
+            sys.stderr.flush()
+            AnimState.line_len = len(status_text)
+
+            AnimState.spinner_frame += 1
+            AnimState.rainbow_offset += 1
+            time.sleep(0.12)
+        else:
+            time.sleep(0.3)
+
+    # Clear animation line on stop
+    if AnimState.line_len > 0:
+        sys.stderr.write(f"\r\033[K")
+        sys.stderr.flush()
+
+
+def trigger_animation(action, status=0):
+    """Activate the animation with a specific action."""
+    AnimState.active = True
+    AnimState.last_action = action
+    AnimState.last_status = status
+
+def stop_animation():
+    """Deactivate the animation."""
+    AnimState.active = False
+    if AnimState.line_len > 0:
+        sys.stderr.write(f"\r\033[K")
+        sys.stderr.flush()
+        AnimState.line_len = 0
+
+
+def show_banner(upstream, host, port):
+    """Show rainbow ASCII art banner."""
+    # Rainbow shield art
+    for line in SHIELD_ART.split('\n'):
+        if line.strip():
+            print(rainbow_text(line, offset=int(time.time() * 10) % len(RAINBOW)))
+    
+    print(f"""
+  {c('v' + VERSION, 'dim')}  ·  {c('Listening on', 'dim')} {c(f'http://{host}:{port}', 'bold')}
+  {c('Proxying to', 'dim')} {c(upstream, 'cyan')}
+
+  {c('🛡️  Shield active', 'green')}  {c('— Claude Code will auto-retry through outages', 'dim')}
+
+""")
+    print(f"  {rainbow_text('● ● ● ● ● ● ● ● ● ●', offset=0)}")
+    print()
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -167,6 +308,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_retry and status in (400,403,408,409,413,504):
             Stats.converted += 1
             self.log(f"[{rid}] {c('CONVERT','cyan')} {status} -> 429 | {text[:100]}")
+            trigger_animation('CONVERT', status)
             err = json.dumps({"type":"error","error":{"type":"rate_limit_error",
                 "message":"Rate limited (converted by ClaudeShield). Retrying."}}).encode()
             self.send_response(429)
@@ -183,6 +325,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                    520,521,522,523,524,525,526,527,529,530):
             Stats.passed += 1
             self.log(f"[{rid}] {c('RETRY','yellow')} {status} | {text[:60]}")
+            trigger_animation('RETRY', status)
             self.send_response(status)
             for k, v in headers:
                 if k.lower() not in ('transfer-encoding','connection',
@@ -203,6 +346,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _net_error(self, msg, rid):
         Stats.errors += 1
         self.log(f"[{rid}] {c('NETERR','red')} -> 503 | {msg[:60]}")
+        trigger_animation('NETERR', 503)
         err = json.dumps({"type":"error","error":{"type":"api_error",
             "message":f"Proxy error: {msg}. Retrying."}}).encode()
         try:
@@ -336,7 +480,7 @@ def interactive_setup():
     print(f"       python \"{script_dest}\" --start\n")
     print(f"    {c('2. In another terminal, launch Claude Code:', 'bold')}")
     print(f"       claude --dangerously-skip-permissions\n")
-    print(f"  {c('That's it! Claude Code will now survive rate limits.', 'green')}\n")
+    print(f"  {c('That is it! Claude Code will now survive rate limits.', 'green')}\n")
     return upstream
 
 
@@ -351,29 +495,22 @@ def run_proxy(upstream, port=DEFAULT_PORT, host="127.0.0.1"):
     Handler.UPSTREAM_PORT = uport
     Handler.USE_TLS = tls
 
-    print(f"""
-{c('╔══════════════════════════════════════════╗', 'cyan')}
-{c('║', 'cyan')}  {c('ClaudeShield', 'bold')} v{VERSION}                       {c('║', 'cyan')}
-{c('║', 'cyan')}  Protecting Claude Code from crashes     {c('║', 'cyan')}
-{c('╠══════════════════════════════════════════╣', 'cyan')}
-{c('║', 'cyan')}  Listen:   http://{host}:{port}{' '*(22-len(host)-len(str(port)))}{c('║', 'cyan')}
-{c('║', 'cyan')}  Upstream: {upstream[:34]:34}      {c('║', 'cyan')}
-{c('╠══════════════════════════════════════════╣', 'cyan')}
-{c('║', 'cyan')}  403/400/504 rate-limit -> 429 {c('retry','green')}    {c('║', 'cyan')}
-{c('║', 'cyan')}  429/5xx server error    -> +Retry {c('retry','green')}    {c('║', 'cyan')}
-{c('║', 'cyan')}  network drop           -> 503   {c('retry','green')}    {c('║', 'cyan')}
-{c('║', 'cyan')}  model/auth error       -> pass   {c('fast','yellow')}     {c('║', 'cyan')}
-{c('║', 'cyan')}  SSE streaming          -> direct {c('live','green')}     {c('║', 'cyan')}
-{c('╚══════════════════════════════════════════╝', 'cyan')}
+    show_banner(upstream, host, port)
 
-  {c('Proxy running.', 'green')} Claude Code will auto-retry through outages.
-  {c('Press Ctrl+C to stop.', 'dim')}
-""", flush=True)
+    # Start animation thread
+    AnimState.stop_flag = False
+    anim = threading.Thread(target=animation_thread, daemon=True)
+    anim.start()
+
+    print(f"  {c('🛡️  Shield active', 'green')}  {c('- Claude Code will auto-retry through outages', 'dim')}")
+    print(f"  {c('Press Ctrl+C to stop.', 'dim')}\n")
 
     server = Server((host, port), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        AnimState.stop_flag = True
+        stop_animation()
         print(f"\n{c('ClaudeShield stopped.', 'yellow')}")
         print(f"  Requests handled: {Stats.requests}")
         print(f"  Errors converted: {c(str(Stats.converted), 'cyan')}")
