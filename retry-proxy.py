@@ -852,7 +852,8 @@ def self_update():
     import shutil
 
     REPO = "brainstormersia-cmd/agentrouter-autoretry-claudecode"
-    URL = f"https://raw.githubusercontent.com/{REPO}/main/retry-proxy.py"
+    # Cache-busting query param - GitHub raw caches ~5 min, this forces fresh
+    URL = f"https://raw.githubusercontent.com/{REPO}/main/retry-proxy.py?ts={int(time.time())}"
     CURRENT = os.path.abspath(__file__)
     TMP = CURRENT + ".new"
 
@@ -869,13 +870,24 @@ def self_update():
             os.remove(TMP)
             return 1
 
+        # Extract remote version for comparison
+        import re as _re
+        m = _re.search(r'VERSION\s*=\s*"([\d.]+)"', new_content)
+        remote_version = m.group(1) if m else "unknown"
+
+        # If same version, still replace (file may have fixes without version bump)
+        if remote_version == VERSION:
+            print(f"  Already on v{VERSION} - re-applying anyway (may include fixes).")
+        else:
+            print(f"  Remote version: {c('v' + remote_version, 'cyan')}")
+
         # Backup current version
         backup = CURRENT + ".bak"
         shutil.copy2(CURRENT, backup)
 
         # Replace
         os.replace(TMP, CURRENT)
-        print(f"  {c('OK', 'green')}: updated to latest version.")
+        print(f"  {c('OK', 'green')}: updated to v{remote_version}.")
         print(f"  Backup saved: {backup}")
         print(f"\n  Restart the proxy to use the new version:")
         print(f"    python \"{CURRENT}\" --start")
