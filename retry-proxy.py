@@ -396,10 +396,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.USE_TLS:
             ctx = ssl.create_default_context()
             conn = http.client.HTTPSConnection(self.UPSTREAM_HOST, self.UPSTREAM_PORT,
-                                               timeout=300, context=ctx)
+                                               timeout=60, context=ctx)
         else:
             conn = http.client.HTTPConnection(self.UPSTREAM_HOST, self.UPSTREAM_PORT,
-                                              timeout=300)
+                                              timeout=60)
         try:
             conn.request(method, self.path, body=body, headers=headers)
             resp = conn.getresponse()
