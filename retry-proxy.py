@@ -921,17 +921,77 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 #  INTERACTIVE SETUP
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-def interactive_setup():
-    """Guide the user through setup with simple questions."""
+def read_settings():
+    """Read current settings.json and return (settings_dict, upstream, has_key, model)."""
     home = os.path.expanduser("~")
-    claude_dir = os.path.join(home, ".claude")
-    settings_path = os.path.join(claude_dir, "settings.json")
+    settings_path = os.path.join(home, ".claude", "settings.json")
+    settings = {}
+    upstream = DEFAULT_UPSTREAM
+    has_key = False
+    model = "claude-opus-5"
 
-    print(f"\n  {c('ClaudeShield Setup', 'bold')}  v{VERSION}\n")
-    print("  This will configure Claude Code to survive rate limits.\n")
-    print("  Answer 3 questions and you're done.\n")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path) as f:
+                settings = json.load(f)
+            env = settings.get("env", {})
+            base_url = env.get("ANTHROPIC_BASE_URL", "")
+            # Detect upstream from base_url if it's not localhost
+            if base_url and "127.0.0.1" not in base_url and "localhost" not in base_url:
+                upstream = base_url.rstrip("/")
+            key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN") or ""
+            has_key = bool(key)
+            model = env.get("ANTHROPIC_MODEL", model)
+        except Exception:
+            pass
+    return settings, upstream, has_key, model, settings_path
 
-    # 1. Which gateway?
+
+def interactive_setup():
+    """Main menu - reads existing config and offers clear options."""
+    settings, upstream, has_key, model, settings_path = read_settings()
+
+    # Detect gateway name from upstream
+    gw_name = "Custom"
+    for name, url, _ in GATEWAYS:
+        if url in upstream:
+            gw_name = name
+            break
+
+    print(f"\n  {c('ClaudeShield', 'bold')} v{VERSION}\n")
+    print(f"  {c('Current configuration:', 'dim')}")
+    print(f"    Gateway:  {c(upstream, 'cyan')}")
+    print(f"    Model:    {c(model, 'cyan')}")
+    print(f"    API key:  {c('configured' if has_key else c('NOT SET', 'red'), 'green' if has_key else 'dim')}")
+    print(f"    Port:     {c(str(DEFAULT_PORT), 'cyan')}")
+    print()
+
+    print(f"  {c('What do you want to do?', 'bold')}\n")
+    print(f"    {c('1', 'cyan')}. Start proxy now")
+    print(f"    {c('2', 'cyan')}. Change gateway / API key / model")
+    print(f"    {c('3', 'cyan')}. Update ClaudeShield to latest version")
+    print(f"    {c('4', 'cyan')}. Show current settings.json")
+    print(f"    {c('5', 'cyan')}. Quit")
+    print()
+
+    choice = input(f"  {c('Choice [1-5]', 'bold')} (default 1): ").strip() or "1"
+
+    if choice == "1":
+        return upstream
+    elif choice == "2":
+        return configure_gateway(settings_path)
+    elif choice == "3":
+        sys.exit(self_update())
+    elif choice == "4":
+        show_settings(settings_path)
+        return None  # don't start
+    else:
+        sys.exit(0)
+
+
+def configure_gateway(settings_path):
+    """Change gateway, API key, and model."""
+    print(f"\n  {c('Configuration', 'bold')}\n")
     print("  Which gateway are you using?")
     for i, (name, url, _) in enumerate(GATEWAYS, 1):
         print(f"    {c(str(i), 'cyan')}. {name} ({url})")
@@ -955,19 +1015,8 @@ def interactive_setup():
             pass
         print(f"  {c('Please enter a number.', 'red')}")
 
-    # 2. API key
-    # Try to read existing key from settings
-    existing_key = ""
-    if os.path.exists(settings_path):
-        try:
-            with open(settings_path) as f:
-                old = json.load(f)
-            env = old.get("env", {})
-            existing_key = (env.get("ANTHROPIC_API_KEY") or
-                           env.get("ANTHROPIC_AUTH_TOKEN") or "")
-        except:
-            pass
-
+    # API key
+    _, _, existing_key, _, _ = read_settings()
     print(f"\n  Enter your {gw_name} API key")
     if existing_key:
         masked = existing_key[:8] + "..." + existing_key[-4:]
@@ -979,31 +1028,19 @@ def interactive_setup():
     elif not api_key:
         print(f"  {c('No key entered. You can add it later in settings.json', 'yellow')}")
 
-    # 3. Model
+    # Model
     print(f"\n  Which model? {c('(press Enter for ' + default_model + ')', 'dim')}")
     model = input(f"  {c('>', 'bold')} ").strip() or default_model
 
-    # 4. Configure
-    print(f"\n  {c('Configuring...', 'cyan')}")
-
-    os.makedirs(claude_dir, exist_ok=True)
-
-    # Copy this script
-    current = os.path.abspath(__file__)
-    script_dest = os.path.join(claude_dir, "retry-proxy.py")
-    if current != script_dest:
-        import shutil
-        shutil.copy2(current, script_dest)
-        print(f"  {c('[OK]', 'green')} Copied proxy to {script_dest}")
-
-    # Read/create settings
+    # Save
+    print(f"\n  {c('Saving...', 'cyan')}")
     settings = {}
     if os.path.exists(settings_path):
         try:
             with open(settings_path) as f:
                 settings = json.load(f)
         except:
-            settings = {}
+            pass
 
     env = settings.get("env", {})
     env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{DEFAULT_PORT}"
@@ -1019,16 +1056,32 @@ def interactive_setup():
 
     with open(settings_path, "w") as f:
         json.dump(settings, f, indent=2)
-    print(f"  {c('[OK]', 'green')} Updated {settings_path}")
-
-    print(f"\n  {c('Done! Setup complete.', 'bold')}\n")
-    print(f"  Now run these two commands:\n")
-    print(f"    {c('1. Start the proxy:', 'bold')}")
-    print(f"       python \"{script_dest}\" --start\n")
-    print(f"    {c('2. In another terminal, launch Claude Code:', 'bold')}")
-    print(f"       claude --dangerously-skip-permissions\n")
-    print(f"  {c('That is it! Claude Code will now survive rate limits.', 'green')}\n")
+    print(f"  {c('[OK]', 'green')} Saved to {settings_path}")
+    print(f"\n  {c('Starting proxy...', 'green')}\n")
     return upstream
+
+
+def show_settings(settings_path):
+    """Display current settings.json."""
+    print(f"\n  {c('Current settings.json:', 'bold')}")
+    print(f"  {c('-' * 50, 'dim')}")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path) as f:
+                content = f.read()
+            # Mask API key for display
+            import re
+            masked = re.sub(
+                r'("(?:ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN)"\s*:\s*")([^"]{8})[^"]*([^"]{4})(")',
+                r'\1\2...\4', content
+            )
+            print(masked)
+        except Exception as e:
+            print(f"  Error reading: {e}")
+    else:
+        print(f"  {c('No settings.json found.', 'yellow')}")
+    print(f"  {c('-' * 50, 'dim')}")
+    input(f"\n  {c('Press Enter to continue...', 'dim')}")
 
 
 def run_proxy(upstream, port=DEFAULT_PORT, host="127.0.0.1"):
