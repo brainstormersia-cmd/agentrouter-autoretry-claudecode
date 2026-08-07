@@ -856,8 +856,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             Stats.converted += 1
             self.log(f"[{rid}] {c('CONVERT','cyan')} {status} -> 429 | {text[:100]}")
             trigger_animation('CONVERT', status)
+            # Friendly random messages - shown to the user in their client
+            shield_messages = [
+                "ClaudeShield is holding the line. Retrying...",
+                "Shield up! Absorbing the hit, retrying...",
+                "Rate limit deflected. ClaudeShield has your back.",
+                "Quota error neutralized. Standing by for retry.",
+                "ClaudeShield caught that. Retrying automatically.",
+                "No worries - ClaudeShield is handling it. Retrying...",
+                "Shield active. Bouncing back from rate limit.",
+                "ClaudeShield: rate limit intercepted, retrying now.",
+            ]
+            msg = shield_messages[Stats.converted % len(shield_messages)]
             err = json.dumps({"type":"error","error":{"type":"rate_limit_error",
-                "message":"Rate limited (converted by ClaudeShield). Retrying."}}).encode()
+                "message":msg}}).encode()
             self.send_response(429)
             self.send_header('Content-Type','application/json')
             self.send_header('Retry-After','20')
